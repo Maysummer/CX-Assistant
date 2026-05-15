@@ -1,0 +1,29 @@
+{
+  "name": "instagram-store-bot",
+  "version": "1.0.0",
+  "description": "Instagram DM store assistant using Claude, Meta Messaging API, and Supabase",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "instagram",
+    "claude",
+    "supabase",
+    "webhook"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@google/generative-ai": "^0.24.1",
+    "@supabase/supabase-js": "^2.49.0",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "ws": "^8.20.1"
+  }
+}
