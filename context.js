@@ -217,6 +217,8 @@ async function getContextFromSupabase(userMessage, merchantScopedId) {
  * @param {string} userMessage
  * @param {string} merchantScopedId — maps to the SME storefront in Topic 1
  */
+const MAX_CONTEXT_LENGTH = 4000; // Defensive truncation for final context
+
 async function getContext(userMessage, merchantScopedId) {
   const topic1 = await fetchCxContextFromStorebuilder(
     merchantScopedId,
@@ -248,10 +250,14 @@ async function getContext(userMessage, merchantScopedId) {
   // Topic 1 configured but empty / error — still try Supabase as secondary cache (optional)
   const fallback = await getContextFromSupabase(userMessage, merchantScopedId);
   if (fallback.trim()) {
-    return (
-      "\n[System note: Topic 1 cx-context returned no rows; partial Supabase fallback follows.]" +
-      fallback
-    );
+    let result =
+      '\n[System note: Topic 1 cx-context returned no rows; partial Supabase fallback follows.]' +
+      fallback;
+    // Truncate if exceeds safe length
+    if (result.length > MAX_CONTEXT_LENGTH) {
+      result = result.slice(0, MAX_CONTEXT_LENGTH) + '\n[... context truncated ...]';
+    }
+    return result;
   }
   return "\n[System note: Topic 1 returned no catalogue context for this query.]\n";
 }

@@ -23,6 +23,7 @@ Rules:
 `.trim();
 
 const MAX_HISTORY_TURNS = 10;
+const MAX_PROMPT_TOKENS = 8000; // Safety guard: truncate context if approaching token limit
 
 function normalizeHistory(messages) {
   if (!Array.isArray(messages)) return [];
@@ -61,19 +62,33 @@ async function processMessage(event, meta = {}) {
     });
 
     // 3. Inject instructions and context data directly inside the prompt
-    const cleanPrompt = `
-${SYSTEM_PROMPT}
+    let contextData = context;
+    const basePrompt = `${SYSTEM_PROMPT}\n\n[CATALOG DATA]\n`;
+    const promptTemplate = `\n\nCustomer: ${userMsg}`;
+    const estimatedLength =
+      basePrompt.length + contextData.length + promptTemplate.length;
 
-[CATALOG DATA]
-${context}
+    // Guard: truncate context if prompt is too large
+    if (estimatedLength > MAX_PROMPT_TOKENS) {
+      const maxContextLen =
+        MAX_PROMPT_TOKENS - basePrompt.length - promptTemplate.length;
+      contextData =
+        context.slice(0, Math.max(100, maxContextLen)) +
+        "\n[... truncated ...]";
+      console.warn(
+        `[WARN] Prompt too large (${estimatedLength}), truncating context`,
+      );
+    }
 
-Customer: ${userMsg}
-`.trim();
+    const cleanPrompt = `${basePrompt}${contextData}${promptTemplate}`;
 
     const result = await chat.sendMessage(cleanPrompt);
     reply = result.response.text();
   } catch (err) {
     console.error("Gemini Error Detail:", err);
+    console.error(
+      `[AI_FAILURE] merchant=${merchantScopedId} user=${userId} error=${err.message || err}`,
+    );
     reply =
       "I'm having a bit of trouble connecting to my brain. Let me notify the owner for you! ESCALATE";
   }
