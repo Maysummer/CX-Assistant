@@ -38,5 +38,19 @@ ALTER TABLE store_config DROP CONSTRAINT IF EXISTS store_config_merchant_key_uni
 CREATE UNIQUE INDEX IF NOT EXISTS store_config_merchant_key_uidx
   ON store_config (merchant_scoped_id, key);
 
+-- store_info: structured merchant-specific store metadata for fallback and frontend use
+CREATE TABLE IF NOT EXISTS store_info (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  merchant_scoped_id TEXT NOT NULL DEFAULT 'default',
+  store_name        TEXT,
+  hours             TEXT,
+  currency          TEXT,
+  instagram_handle  TEXT,
+  address           TEXT,
+  other_info        JSONB,
+  updated_at        TIMESTAMPTZ DEFAULT now(),
+  CONSTRAINT store_info_merchant_unique UNIQUE (merchant_scoped_id)
+);
+
 -- orders: merchant scope for reporting
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS merchant_scoped_id TEXT DEFAULT 'default';

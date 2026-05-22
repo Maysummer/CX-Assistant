@@ -1,4 +1,9 @@
 const { processMessage } = require("./bot");
+const {
+  loadInstagramAccount,
+  tryAutomationDmReply,
+  tryAutomationCommentReply,
+} = require("./automation");
 
 // Idempotency tracking: prevent duplicate message processing
 const seenEvents = new Map(); // { key: timestamp } to detect replays
@@ -55,13 +60,13 @@ async function handleWebhook(req, res) {
     const entries = body.entry || [];
     for (const entry of entries) {
       const merchantScopedId = merchantScopedIdFromEntry(entry);
+      const account = await loadInstagramAccount(merchantScopedId);
+
       const messaging = entry.messaging || [];
       for (const event of messaging) {
-        // Only process if it's a message and NOT an echo
         if (event.message && !event.message.is_echo) {
           const text = event.message.text;
           if (typeof text === "string" && text.trim()) {
-            // Idempotency: skip if we've seen this event recently
             const dedupKey = getDedupKey(entry, event);
             if (seenEvents.has(dedupKey)) {
               console.log(`[DEDUP] Skipping duplicate event: ${dedupKey}`);
@@ -69,9 +74,21 @@ async function handleWebhook(req, res) {
             }
             seenEvents.set(dedupKey, now);
             console.log(`Message received for Store: ${merchantScopedId}`);
+
+            if (account) {
+              const handled = await tryAutomationDmReply(account, event);
+              if (handled) continue;
+            }
+
             await processMessage(event, { merchantScopedId });
           }
         }
+      }
+
+      const changes = entry.changes || [];
+      for (const change of changes) {
+        if (change.field !== "comments" || !change.value || !account) continue;
+        await tryAutomationCommentReply(account, change.value);
       }
     }
   } catch (err) {

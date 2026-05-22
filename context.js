@@ -118,7 +118,23 @@ function formatStoreFromTopic1(store) {
     keys.map((k) => `${k}: ${store[k]}`).join("\n")
   );
 }
-
+function formatStoreFromSupabase(store) {
+  if (!store || typeof store !== "object") return "";
+  const parts = [];
+  if (store.store_name) parts.push(`store_name: ${store.store_name}`);
+  if (store.hours) parts.push(`hours: ${store.hours}`);
+  if (store.currency) parts.push(`currency: ${store.currency}`);
+  if (store.instagram_handle)
+    parts.push(`instagram_handle: ${store.instagram_handle}`);
+  if (store.address) parts.push(`address: ${store.address}`);
+  if (store.other_info && typeof store.other_info === "object") {
+    for (const [key, value] of Object.entries(store.other_info)) {
+      parts.push(`${key}: ${value}`);
+    }
+  }
+  if (!parts.length) return "";
+  return "\n[Store info]\n" + parts.join("\n");
+}
 /**
  * Supabase fallback when Topic 1 API is not configured or returns nothing.
  * Seed `products` / `faqs` / `store_config` with optional `merchant_scoped_id` to match the merchant.
@@ -188,10 +204,29 @@ async function getContextFromSupabase(userMessage, merchantScopedId) {
       faqRows.map((f) => `Q: ${f.question}\nA: ${f.answer}`).join("\n\n");
   }
 
-  const { data: storeRows } = await supabase
+  const { data: storeInfoRows, error: storeInfoErr } = await supabase
+    .from("store_info")
+    .select(
+      "store_name, hours, currency, instagram_handle, address, other_info, merchant_scoped_id",
+    )
+    .in("merchant_scoped_id", [mid, "default"])
+    .limit(2);
+  if (storeInfoErr) console.error("store_info query:", storeInfoErr.message);
+
+  const storeInfo =
+    (storeInfoRows || []).find((row) => row.merchant_scoped_id === mid) ||
+    (storeInfoRows || [])[0];
+
+  if (storeInfo) {
+    context += formatStoreFromSupabase(storeInfo);
+  }
+
+  const { data: storeRows, error: storeErr } = await supabase
     .from("store_config")
     .select("key, value, merchant_scoped_id")
     .limit(40);
+
+  if (storeErr) console.error("store_config query:", storeErr.message);
 
   const storeFiltered = (storeRows || []).filter(
     (r) =>
@@ -251,11 +286,12 @@ async function getContext(userMessage, merchantScopedId) {
   const fallback = await getContextFromSupabase(userMessage, merchantScopedId);
   if (fallback.trim()) {
     let result =
-      '\n[System note: Topic 1 cx-context returned no rows; partial Supabase fallback follows.]' +
+      "\n[System note: Topic 1 cx-context returned no rows; partial Supabase fallback follows.]" +
       fallback;
     // Truncate if exceeds safe length
     if (result.length > MAX_CONTEXT_LENGTH) {
-      result = result.slice(0, MAX_CONTEXT_LENGTH) + '\n[... context truncated ...]';
+      result =
+        result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
     }
     return result;
   }

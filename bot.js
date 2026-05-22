@@ -3,6 +3,7 @@ const { getSession, saveSession } = require("./supabase");
 const { getContext } = require("./context");
 const { sendReply } = require("./instagram");
 const { extractOwnerTasks, persistOwnerTasks } = require("./ownerFollowUps");
+const { getPageAccessToken } = require("./accountResolver");
 
 // 1. Initialize with stable API versioning using the package default version
 const genAI = new GoogleGenerativeAI(process.env.AI_API_KEY);
@@ -119,6 +120,13 @@ async function processMessage(event, meta = {}) {
     newHistory.slice(-MAX_HISTORY_TURNS * 2),
   );
 
+  const pageToken = await getPageAccessToken(merchantScopedId);
+  if (!pageToken) {
+    console.error(
+      `[bot] No access token for merchant ${merchantScopedId}. Connect Instagram in Lynk Integrations.`,
+    );
+    return;
+  }
   // Send to Instagram
   await sendReply(userId, outbound);
 }

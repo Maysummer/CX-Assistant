@@ -34,9 +34,24 @@ CREATE TABLE faqs (
 );
 
 CREATE TABLE store_config (
-  id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  key   TEXT UNIQUE NOT NULL,
-  value TEXT NOT NULL
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  key               TEXT NOT NULL,
+  value             TEXT NOT NULL,
+  merchant_scoped_id TEXT,
+  CONSTRAINT store_config_merchant_key_unique UNIQUE (merchant_scoped_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS store_info (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  merchant_scoped_id TEXT NOT NULL DEFAULT 'default',
+  store_name        TEXT,
+  hours             TEXT,
+  currency          TEXT,
+  instagram_handle  TEXT,
+  address           TEXT,
+  other_info        JSONB,
+  updated_at        TIMESTAMPTZ DEFAULT now(),
+  CONSTRAINT store_info_merchant_unique UNIQUE (merchant_scoped_id)
 );
 
 -- Optional: full-text search on products (enables .textSearch in Supabase client)

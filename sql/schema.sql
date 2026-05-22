@@ -53,6 +53,19 @@ CREATE TABLE IF NOT EXISTS store_config (
   CONSTRAINT store_config_merchant_key_unique UNIQUE (merchant_scoped_id, key)
 );
 
+CREATE TABLE IF NOT EXISTS store_info (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  merchant_scoped_id TEXT NOT NULL DEFAULT 'default',
+  store_name        TEXT,
+  hours             TEXT,
+  currency          TEXT,
+  instagram_handle  TEXT,
+  address           TEXT,
+  other_info        JSONB,
+  updated_at        TIMESTAMPTZ DEFAULT now(),
+  CONSTRAINT store_info_merchant_unique UNIQUE (merchant_scoped_id)
+);
+
 -- SME owner reminders (Topic 2 — dashboard / push notifications; not sent to IG customer)
 CREATE TABLE IF NOT EXISTS owner_follow_ups (
   id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
