@@ -60,6 +60,7 @@ async function handleWebhook(req, res) {
     const entries = body.entry || [];
     for (const entry of entries) {
       const merchantScopedId = merchantScopedIdFromEntry(entry);
+      console.log(`[WEBHOOK] entry.id=${entry?.id} merchantScopedId=${merchantScopedId}`);
       const account = await loadInstagramAccount(merchantScopedId);
 
       const messaging = entry.messaging || [];

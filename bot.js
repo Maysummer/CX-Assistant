@@ -4,6 +4,7 @@ const { getContext } = require("./context");
 const { sendReply } = require("./instagram");
 const { extractOwnerTasks, persistOwnerTasks } = require("./ownerFollowUps");
 const { getPageAccessToken } = require("./accountResolver");
+const {recordAiDmOutcome} = require("./dmEvents");
 
 // 1. Initialize with stable API versioning using the package default version
 const genAI = new GoogleGenerativeAI(process.env.AI_API_KEY);
@@ -17,6 +18,8 @@ You are the Instagram Customer Experience assistant for a merchant in the GTCO m
 Your job: fast, professional, consistent DM support using ONLY provided product facts.
 
 Rules:
+- NEVER send generic greetings like "Hello! Welcome to..." unless the customer explicitly greets you first.
+- Only reply to the customer's specific question or concern.
 - Concisely answer product questions using only the [CATALOG DATA] provided.
 - If context/facts are missing, say you'll check and offer a human handoff.
 - Commitments to the customer must generate an OWNER_TASK line for the merchant.
@@ -125,10 +128,12 @@ async function processMessage(event, meta = {}) {
     console.error(
       `[bot] No access token for merchant ${merchantScopedId}. Connect Instagram in Lynk Integrations.`,
     );
+    await recordAiDmOutcome({merchantScopedId, event, send: null, escalated});
     return;
   }
   // Send to Instagram
-  await sendReply(userId, outbound);
+  const send = await sendReply(userId, outbound, pageToken);
+  await recordAiDmOutcome({merchantScopedId, event, send, escalated});
 }
 
 module.exports = { processMessage };

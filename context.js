@@ -137,7 +137,7 @@ function formatStoreFromSupabase(store) {
 }
 /**
  * Supabase fallback when Topic 1 API is not configured or returns nothing.
- * Seed `products` / `faqs` / `store_config` with optional `merchant_scoped_id` to match the merchant.
+ * Seed `products` / `faqs` / `store_info` with optional `merchant_scoped_id` to match the merchant.
  */
 async function getContextFromSupabase(userMessage, merchantScopedId) {
   const phrase = searchPhrase(userMessage);
@@ -219,26 +219,6 @@ async function getContextFromSupabase(userMessage, merchantScopedId) {
 
   if (storeInfo) {
     context += formatStoreFromSupabase(storeInfo);
-  }
-
-  const { data: storeRows, error: storeErr } = await supabase
-    .from("store_config")
-    .select("key, value, merchant_scoped_id")
-    .limit(40);
-
-  if (storeErr) console.error("store_config query:", storeErr.message);
-
-  const storeFiltered = (storeRows || []).filter(
-    (r) =>
-      !r.merchant_scoped_id ||
-      r.merchant_scoped_id === mid ||
-      r.merchant_scoped_id === "default",
-  );
-
-  if (storeFiltered?.length) {
-    context +=
-      "\n[Store info]\n" +
-      storeFiltered.map((r) => `${r.key}: ${r.value}`).join("\n");
   }
 
   return context;

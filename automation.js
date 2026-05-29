@@ -221,4 +221,6 @@ module.exports = {
   loadInstagramAccount,
   tryAutomationDmReply,
   tryAutomationCommentReply,
+  recordDmEvent,
+
 };

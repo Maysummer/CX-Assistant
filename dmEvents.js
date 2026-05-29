@@ -1,5 +1,5 @@
 const { supabase } = require("./supabase");
-const { loadInstagramAccount, recordDmEvent } = require("./automations");
+const { loadInstagramAccount, recordDmEvent } = require("./automation");
 
 /**
  * Meta message id for dm_events.ig_event_id (upsert key).
@@ -25,12 +25,7 @@ async function resolveOwnerUserId(merchantScopedId) {
  * Log outcome after Gemini sends (or cannot send) a DM.
  * Call this whenever the customer should see sent vs needs-human on the Lynk dashboard.
  */
-async function recordAiDmOutcome({
-  merchantScopedId,
-  event,
-  send,
-  escalated,
-}) {
+async function recordAiDmOutcome({ merchantScopedId, event, send, escalated }) {
   const igEventId = resolveIgEventId(event);
   const ownerUserId = await resolveOwnerUserId(merchantScopedId);
 
@@ -42,7 +37,9 @@ async function recordAiDmOutcome({
     return;
   }
   if (!igEventId) {
-    console.error("[dmEvents] Cannot log activity: missing message mid on event payload.");
+    console.error(
+      "[dmEvents] Cannot log activity: missing message mid on event payload.",
+    );
     return;
   }
 
