@@ -1,86 +1,159 @@
 /**
- * Topic 1 — GT Micro-Business Digital Storefront · AI StoreBuilder
- * -----------------------------------------------------------------
- * The canonical product catalogue, storefront structure, and published
- * merchant configuration live in the StoreBuilder service (Topic 1).
- * Topic 2 (this Instagram CX Assistant) MUST consume that data in production
- * so DM answers always match what the merchant published on their storefront.
+ * Topic 1 — AISLE Chatbot API Integration
+ * ----------------------------------------
+ * Fetch products for a specific store from the AISLE platform.
  *
- * Expected integration (adjust paths to match your Topic 1 implementation):
+ * API Endpoint: https://aisle-sandy.vercel.app/api/storefront/products
+ * Authentication: x-api-key header
+ * Query Params: instagram (handle) or store_id (UUID)
  *
- *   GET {STOREFRONT_API_BASE_URL}/merchants/{merchantScopedId}/cx-context
- *       ?q={encodedUserMessage}
- *   Headers: Authorization: Bearer {STOREFRONT_API_KEY}
- *           (or X-GTCO-SME-Token / mTLS — align with your bank auth model)
- *
- *   200 JSON body (example contract):
- *   {
- *     "products": [{ "name", "price", "description", "stock", "category" }],
- *     "faqs": [{ "question", "answer", "category" }],
- *     "store": { "store_name": "...", "hours": "...", ... }
- *   }
- *
- * Optional: Topic 1 can also expose POST /orders to sync enquiries — wire in bot.js later.
+ * Response format:
+ * {
+ *   "store": { "id", "business_name", "instagram_handle" },
+ *   "products": [{ "id", "name", "description", "price", "available" }],
+ *   "total": number
+ * }
  *
  * When STOREFRONT_API_BASE_URL is unset, context.js falls back to Supabase (demo / dev only).
  */
 
 const axios = require("axios");
+const { supabase } = require("./supabase");
 
 function baseUrl() {
   const b = process.env.STOREFRONT_API_BASE_URL;
   return b ? b.replace(/\/$/, "") : "";
 }
 
+function productsUrl() {
+  const explicit = process.env.AISLE_STOREFRONT_API_URL?.trim();
+  if (explicit) return explicit.replace(/\/$/, "");
+
+  const base = baseUrl();
+  if (!base) return "";
+  if (base.endsWith("/products")) return base;
+  return `${base}/products`;
+}
+
 /**
- * Fetch pre-ranked catalogue + FAQ + store copy for the CX model.
- * @param {string} merchantScopedId — Typically Meta `entry.id` (IG business / page scope) mapped to Topic 1 merchant/store id
- * @param {string} userMessage — Raw customer DM (Topic 1 may use it for search / RAG)
+ * Fetch store instagram handle from store_info table.
+ * @param {string} merchantScopedId — merchant_scoped_id (maps to store_info row)
+ * @returns {Promise<string | null>} instagram handle without '@'
+ */
+async function resolveInstagramHandle(merchantScopedId) {
+  if (!merchantScopedId || merchantScopedId === "default") return null;
+
+  try {
+    // Prefer the connected IG account username for the webhook owner.
+    const { data: accountData, error: accountError } = await supabase
+      .from("instagram_accounts")
+      .select("username")
+      .eq("ig_user_id", String(merchantScopedId))
+      .maybeSingle();
+
+    if (accountError) {
+      console.error(
+        "[AISLE] resolveInstagramHandle account query error:",
+        accountError.message,
+      );
+    }
+
+    const username = accountData?.username;
+    if (username) {
+      return username.replace(/^@/, "");
+    }
+
+    // Fallback to store_info row if a direct account username is not available.
+    const { data, error } = await supabase
+      .from("store_info")
+      .select("instagram_handle")
+      .eq("merchant_scoped_id", merchantScopedId)
+      .maybeSingle();
+
+    if (error || !data?.instagram_handle) return null;
+
+    return data.instagram_handle.replace(/^@/, "");
+  } catch (e) {
+    console.error("[AISLE] resolveInstagramHandle error:", e.message || e);
+    return null;
+  }
+}
+
+/**
+ * Fetch products from AISLE platform via Topic 1 API.
+ * @param {string} merchantScopedId — Merchant ID (maps to store_info.merchant_scoped_id)
+ * @param {string} userMessage — Raw customer DM (optional for future search enhancements)
  * @returns {Promise<{ products: object[], faqs: object[], store: Record<string, string> } | null>}
  */
 async function fetchCxContextFromStorebuilder(merchantScopedId, userMessage) {
-  const base = baseUrl();
-  if (!base || !merchantScopedId) return null;
+  const url = productsUrl();
+  if (!url || !merchantScopedId) return null;
 
-  const path =
-    process.env.STOREFRONT_CX_CONTEXT_PATH ||
-    `/merchants/${merchantScopedId}/cx-context`;
-  const url =
-    base + path.replace("{merchantId}", encodeURIComponent(merchantScopedId));
+  // Resolve instagram handle from store_info table
+  const instagramHandle = await resolveInstagramHandle(merchantScopedId);
+  if (!instagramHandle) {
+    console.warn(
+      `[AISLE] No instagram handle found for merchant=${merchantScopedId}`,
+    );
+    return null;
+  }
 
   const headers = {};
-  const key = process.env.STOREFRONT_API_KEY;
-  if (key) headers.Authorization = `Bearer ${key}`;
+  const key = process.env.STOREFRONT_API_KEY || process.env.AISLE_API_KEY;
+  if (key) headers["x-api-key"] = key;
 
   try {
+    console.log(
+      `[AISLE] Request: GET ${url} instagram=${instagramHandle} x-api-key=${Boolean(key)}`,
+    );
     const res = await axios.get(url, {
       headers,
-      params: { q: userMessage },
+      params: { instagram: instagramHandle },
       timeout: Number(process.env.STOREFRONT_API_TIMEOUT_MS) || 12000,
       validateStatus: () => true,
     });
+
+    console.log(
+      `[AISLE] Response: status=${res.status} data=${
+        typeof res.data === "object" ? JSON.stringify(res.data) : res.data
+      }`,
+    );
+
     if (res.status >= 400) {
       console.error(
-        "[Topic1 StoreBuilder] cx-context HTTP",
+        "[AISLE] products HTTP",
         res.status,
-        res.data,
+        res.data?.error || res.data,
       );
       return null;
     }
+
     const data = res.data;
     if (!data || typeof data !== "object") return null;
+
+    // Transform AISLE response to match bot's expected format
+    // AISLE returns: { store, products, total }
+    // Bot expects: { products, faqs, store }
     return {
-      products: Array.isArray(data.products) ? data.products : [],
-      faqs: Array.isArray(data.faqs) ? data.faqs : [],
-      store:
-        data.store &&
-        typeof data.store === "object" &&
-        !Array.isArray(data.store)
-          ? data.store
-          : {},
+      products: (Array.isArray(data.products) ? data.products : []).map(
+        (p) => ({
+          name: p.name || "Item",
+          price: p.price ? String(p.price).replace(/₦/g, "") : "0",
+          description: p.description || "",
+          stock: p.available ? 1 : 0,
+          category: p.category || "",
+        }),
+      ),
+      faqs: [], // AISLE API doesn't return FAQs; fall back to Supabase if needed
+      store: data.store
+        ? {
+            store_name: data.store.business_name || "",
+            instagram_handle: data.store.instagram_handle || "",
+          }
+        : {},
     };
   } catch (e) {
-    console.error("[Topic1 StoreBuilder] cx-context error:", e.message || e);
+    console.error("[AISLE] products error:", e.message || e);
     return null;
   }
 }

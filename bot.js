@@ -4,9 +4,8 @@ const { getContext } = require("./context");
 const { sendReply } = require("./instagram");
 const { extractOwnerTasks, persistOwnerTasks } = require("./ownerFollowUps");
 const { getPageAccessToken } = require("./accountResolver");
-const {recordAiDmOutcome} = require("./dmEvents");
+const { recordAiDmOutcome } = require("./dmEvents");
 
-// 1. Initialize with stable API versioning using the package default version
 const genAI = new GoogleGenerativeAI(process.env.AI_API_KEY);
 const model = genAI.getGenerativeModel(
   { model: process.env.GENAI_MODEL || "gemini-2.5-flash" },
@@ -15,19 +14,22 @@ const model = genAI.getGenerativeModel(
 
 const SYSTEM_PROMPT = `
 You are the Instagram Customer Experience assistant for a merchant in the GTCO micro-business ecosystem.
-Your job: fast, professional, consistent DM support using ONLY provided product facts.
+Your job: fast, professional, consistent DM support using ONLY the product facts in [CATALOG DATA].
 
 Rules:
-- NEVER send generic greetings like "Hello! Welcome to..." unless the customer explicitly greets you first.
-- Only reply to the customer's specific question or concern.
-- Concisely answer product questions using only the [CATALOG DATA] provided.
-- If context/facts are missing, say you'll check and offer a human handoff.
-- Commitments to the customer must generate an OWNER_TASK line for the merchant.
-- If a human is needed, include a single line with only the word: ESCALATE.
+- LANGUAGE RULE: Detect the language of the customer's exact message text. If the message is in English, reply in English. Only reply in another language when the customer clearly writes in that language. Do not invent a different language or switch languages arbitrarily.
+- Answer product and catalogue questions using ONLY [CATALOG DATA]. When products are listed there, tell the customer names, prices, and availability directly.
+- For "what do you have?", "what's available?", "show me your products", or similar — if [CATALOG DATA] includes a product list, reply with a short friendly list (name, price, brief detail). You already have the catalogue; answer the customer yourself.
+- NEVER output OWNER_TASK asking the merchant to "provide product catalog", "provide product list", or "give catalogue to the assistant". Those are forbidden.
+- When you commit to checking something specific with the team (e.g., "I'll check if we carry X" or "I'll confirm availability"), output an OWNER_TASK line describing what to check.
+- Use OWNER_TASK for actionable owner work: confirmed orders, reservations, custom requests, specific commitments, or team checks the customer is waiting on.
+- If [CATALOG DATA] has no products, tell the customer the team is updating the catalogue and offer to connect them with someone — do NOT create OWNER_TASK about supplying a catalog to you.
+- If a specific fact is missing, say you'll check with the team. Include a single line with only the word ESCALATE only when the customer needs a human right now.
+- Keep replies short and Instagram-friendly (a few sentences or a compact bullet list).
 `.trim();
 
 const MAX_HISTORY_TURNS = 10;
-const MAX_PROMPT_TOKENS = 8000; // Safety guard: truncate context if approaching token limit
+const MAX_PROMPT_TOKENS = 8000;
 
 function normalizeHistory(messages) {
   if (!Array.isArray(messages)) return [];
@@ -50,7 +52,6 @@ async function processMessage(event, meta = {}) {
   console.log(`--- NEW MESSAGE FROM ${userId} ---`);
   console.log(`User said: ${userMsg}`);
 
-  // Fetch Session & Context
   const session = await getSession(merchantScopedId, userId);
   const geminiHistory = normalizeHistory(session?.messages);
   const context = await getContext(userMsg, merchantScopedId);
@@ -60,19 +61,16 @@ async function processMessage(event, meta = {}) {
 
   let reply;
   try {
-    // 2. Start chat with raw history elements only
     const chat = model.startChat({
       history: geminiHistory,
     });
 
-    // 3. Inject instructions and context data directly inside the prompt
     let contextData = context;
     const basePrompt = `${SYSTEM_PROMPT}\n\n[CATALOG DATA]\n`;
     const promptTemplate = `\n\nCustomer: ${userMsg}`;
     const estimatedLength =
       basePrompt.length + contextData.length + promptTemplate.length;
 
-    // Guard: truncate context if prompt is too large
     if (estimatedLength > MAX_PROMPT_TOKENS) {
       const maxContextLen =
         MAX_PROMPT_TOKENS - basePrompt.length - promptTemplate.length;
@@ -85,7 +83,6 @@ async function processMessage(event, meta = {}) {
     }
 
     const cleanPrompt = `${basePrompt}${contextData}${promptTemplate}`;
-
     const result = await chat.sendMessage(cleanPrompt);
     reply = result.response.text();
   } catch (err) {
@@ -97,7 +94,6 @@ async function processMessage(event, meta = {}) {
       "I'm having a bit of trouble connecting to my brain. Let me notify the owner for you! ESCALATE";
   }
 
-  // Handle Escalations and Tasks
   const { customerText, tasks } = extractOwnerTasks(reply);
   const escalated = customerText.includes("ESCALATE");
   const outbound =
@@ -106,12 +102,16 @@ async function processMessage(event, meta = {}) {
 
   console.log(`Gemini Reply: ${outbound}`);
 
-  // Save Tasks
   if (tasks.length > 0) {
     await persistOwnerTasks(merchantScopedId, userId, tasks);
+  } else if (escalated) {
+    const preview =
+      userMsg.length > 160 ? `${userMsg.slice(0, 160)}…` : userMsg;
+    await persistOwnerTasks(merchantScopedId, userId, [
+      `Customer needs human help. Last message: "${preview}"`,
+    ]);
   }
 
-  // Save History
   const newHistory = [
     ...(session?.messages || []),
     { role: "user", content: userMsg },
@@ -128,12 +128,22 @@ async function processMessage(event, meta = {}) {
     console.error(
       `[bot] No access token for merchant ${merchantScopedId}. Connect Instagram in Lynk Integrations.`,
     );
-    await recordAiDmOutcome({merchantScopedId, event, send: null, escalated});
+    await recordAiDmOutcome({
+      merchantScopedId,
+      event,
+      send: null,
+      escalated,
+    });
     return;
   }
-  // Send to Instagram
+
   const send = await sendReply(userId, outbound, pageToken);
-  await recordAiDmOutcome({merchantScopedId, event, send, escalated});
+  await recordAiDmOutcome({
+    merchantScopedId,
+    event,
+    send,
+    escalated,
+  });
 }
 
 module.exports = { processMessage };

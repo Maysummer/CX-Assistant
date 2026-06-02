@@ -11,8 +11,10 @@ const DEDUP_WINDOW_MS = 60000; // 60s window to catch retries
 
 function getDedupKey(entry, event) {
   // Key format: merchantId:messageId
-  const mid = entry?.id || 'unknown';
-  const mid_str = event?.message?.mid || `${event.sender.id}:${event.timestamp || Date.now()}`;
+  const mid = entry?.id || "unknown";
+  const mid_str =
+    event?.message?.mid ||
+    `${event.sender.id}:${event.timestamp || Date.now()}`;
   return `${mid}:${mid_str}`;
 }
 
@@ -47,6 +49,10 @@ async function handleWebhook(req, res) {
 
   try {
     const body = req.body;
+    console.log(
+      `[WEBHOOK BODY] object=${body?.object} entries=${(body?.entry || []).length}`,
+    );
+    console.log(`[WEBHOOK BODY DUMP] ${JSON.stringify(body)}`);
     if (!body || !isSupportedWebhookObject(body.object)) return;
 
     // Clean stale entries from dedup map (older than window)
@@ -60,12 +66,17 @@ async function handleWebhook(req, res) {
     const entries = body.entry || [];
     for (const entry of entries) {
       const merchantScopedId = merchantScopedIdFromEntry(entry);
-      console.log(`[WEBHOOK] entry.id=${entry?.id} merchantScopedId=${merchantScopedId}`);
+      console.log(
+        `[WEBHOOK] entry.id=${entry?.id} merchantScopedId=${merchantScopedId}`,
+      );
       const account = await loadInstagramAccount(merchantScopedId);
 
       const messaging = entry.messaging || [];
       for (const event of messaging) {
         if (event.message && !event.message.is_echo) {
+          console.log(
+            `[WEBHOOK EVENT] mid=${event.message?.mid} sender=${event.sender?.id} ts=${event.timestamp} is_echo=${event.message?.is_echo}`,
+          );
           const text = event.message.text;
           if (typeof text === "string" && text.trim()) {
             const dedupKey = getDedupKey(entry, event);

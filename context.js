@@ -1,5 +1,14 @@
 const { supabase } = require("./supabase");
 const { fetchCxContextFromStorebuilder, baseUrl } = require("./storefrontApi");
+const {
+  fetchAisleStorefrontProducts,
+  formatAisleCatalogueForPrompt,
+  isAisleConfigured,
+} = require("./aisleStorefront");
+const {
+  resolveMerchantInstagramHandle,
+  resolveLynkUserId,
+} = require("./accountResolver");
 
 /** Escape % and _ for PostgREST ilike patterns */
 function escapeIlike(value) {
@@ -83,6 +92,25 @@ function searchPhrase(userMessage) {
   return words.slice(0, 5).join(" ");
 }
 
+/** Broad catalogue questions where we should list all products, not keyword-search. */
+function isCatalogListingQuestion(userMessage) {
+  const lower = userMessage.toLowerCase().trim();
+  const patterns = [
+    /\bwhat do you have\b/,
+    /\bwhat('s| is) available\b/,
+    /\bwhat do you sell\b/,
+    /\bwhat can i (buy|get|order)\b/,
+    /\bshow (me )?(your )?(products|catalog|catalogue|menu|items)\b/,
+    /\b(product|item) (list|catalog|catalogue)\b/,
+    /\blist (your )?(products|items)\b/,
+    /\bdo you have anything\b/,
+    /\bwhat('s| is) on (the menu|offer)\b/,
+    /\bwhat products\b/,
+    /\bwhat items\b/,
+  ];
+  return patterns.some((p) => p.test(lower));
+}
+
 /** PostgREST .or() values that contain commas or wildcards should be double-quoted */
 function quotedIlikePattern(phrase) {
   const pattern = `%${escapeIlike(phrase)}%`;
@@ -118,33 +146,83 @@ function formatStoreFromTopic1(store) {
     keys.map((k) => `${k}: ${store[k]}`).join("\n")
   );
 }
-function formatStoreFromSupabase(store) {
-  if (!store || typeof store !== "object") return "";
-  const parts = [];
-  if (store.store_name) parts.push(`store_name: ${store.store_name}`);
-  if (store.hours) parts.push(`hours: ${store.hours}`);
-  if (store.currency) parts.push(`currency: ${store.currency}`);
-  if (store.instagram_handle)
-    parts.push(`instagram_handle: ${store.instagram_handle}`);
-  if (store.address) parts.push(`address: ${store.address}`);
-  if (store.other_info && typeof store.other_info === "object") {
-    for (const [key, value] of Object.entries(store.other_info)) {
-      parts.push(`${key}: ${value}`);
-    }
+
+function formatOtherInfo(otherInfo) {
+  if (otherInfo == null) return [];
+  if (typeof otherInfo === "string") {
+    const trimmed = otherInfo.trim();
+    return trimmed ? [trimmed] : [];
   }
-  if (!parts.length) return "";
-  return "\n[Store info]\n" + parts.join("\n");
+  if (typeof otherInfo === "object" && !Array.isArray(otherInfo)) {
+    return Object.entries(otherInfo).map(([k, v]) => `${k}: ${v}`);
+  }
+  return [];
 }
+
 /**
- * Supabase fallback when Topic 1 API is not configured or returns nothing.
- * Seed `products` / `faqs` / `store_info` with optional `merchant_scoped_id` to match the merchant.
+ * AISLE Storefront — live product catalogue matched by Instagram handle.
+ */
+async function fetchCxContextFromAisle(merchantScopedId) {
+  if (!isAisleConfigured()) return null;
+
+  const instagram = await resolveMerchantInstagramHandle(merchantScopedId);
+  if (!instagram) {
+    console.warn(
+      `[AISLE] No instagram_accounts.username for ig_user_id=${merchantScopedId}`,
+    );
+    return null;
+  }
+
+  try {
+    const data = await fetchAisleStorefrontProducts({ instagram });
+    const block = formatAisleCatalogueForPrompt(data);
+    if (!block?.trim()) return null;
+    console.info(
+      `[AISLE] Loaded ${data.total ?? data.products?.length ?? 0} products for @${instagram}`,
+    );
+    return `\n[Products — from AISLE Storefront]\n${block}`;
+  } catch (e) {
+    console.error(`[AISLE] catalogue error for @${instagram}:`, e.message || e);
+    return null;
+  }
+}
+
+/**
+ * Supabase fallback when external catalogue APIs are not configured or return nothing.
  */
 async function getContextFromSupabase(userMessage, merchantScopedId) {
   const phrase = searchPhrase(userMessage);
+  const listAllProducts = isCatalogListingQuestion(userMessage);
   let context = "";
   const mid = merchantScopedId || "default";
+  const lynkUserId = await resolveLynkUserId(merchantScopedId);
+  const scopeIds = new Set([mid, "default"]);
+  if (lynkUserId) scopeIds.add(lynkUserId);
 
-  if (phrase) {
+  const formatProductRows = (rows) =>
+    rows
+      .map(
+        (p) =>
+          `${p.name} — $${p.price} | Stock: ${p.stock} | ${p.description || ""}`,
+      )
+      .join("\n");
+
+  if (listAllProducts) {
+    const { data: allProducts, error: allErr } = await supabase
+      .from("products")
+      .select("name, price, description, stock, category, merchant_scoped_id")
+      .limit(30);
+    if (allErr) console.error("products (catalog list) query:", allErr.message);
+
+    const scoped = (allProducts || []).filter(
+      (p) => !p.merchant_scoped_id || scopeIds.has(p.merchant_scoped_id),
+    );
+    if (scoped.length) {
+      context +=
+        "\n[Products — Supabase demo / dev fallback]\n" +
+        formatProductRows(scoped.slice(0, 20));
+    }
+  } else if (phrase) {
     const q = quotedIlikePattern(phrase);
     const { data: products, error: prodErr } = await supabase
       .from("products")
@@ -155,22 +233,14 @@ async function getContextFromSupabase(userMessage, merchantScopedId) {
 
     const scoped =
       (products || []).filter(
-        (p) =>
-          !p.merchant_scoped_id ||
-          p.merchant_scoped_id === mid ||
-          p.merchant_scoped_id === "default",
+        (p) => !p.merchant_scoped_id || scopeIds.has(p.merchant_scoped_id),
       ) || [];
 
     const picked = scoped.slice(0, 5);
     if (picked.length) {
       context +=
-        "\n[Products — Supabase demo / dev; replace with Topic 1 API in production]\n" +
-        picked
-          .map(
-            (p) =>
-              `${p.name} — $${p.price} | Stock: ${p.stock} | ${p.description || ""}`,
-          )
-          .join("\n");
+        "\n[Products — Supabase demo / dev fallback]\n" +
+        formatProductRows(picked);
     }
   }
 
@@ -182,10 +252,7 @@ async function getContextFromSupabase(userMessage, merchantScopedId) {
   if (faqErr) console.error("faqs query:", faqErr.message);
 
   let faqRows = (faqs || []).filter(
-    (f) =>
-      !f.merchant_scoped_id ||
-      f.merchant_scoped_id === mid ||
-      f.merchant_scoped_id === "default",
+    (f) => !f.merchant_scoped_id || scopeIds.has(f.merchant_scoped_id),
   );
   if (phrase && faqRows.length) {
     const matched = faqRows.filter(
@@ -204,41 +271,88 @@ async function getContextFromSupabase(userMessage, merchantScopedId) {
       faqRows.map((f) => `Q: ${f.question}\nA: ${f.answer}`).join("\n\n");
   }
 
-  const { data: storeInfoRows, error: storeInfoErr } = await supabase
-    .from("store_info")
-    .select(
-      "store_name, hours, currency, instagram_handle, address, other_info, merchant_scoped_id",
-    )
-    .in("merchant_scoped_id", [mid, "default"])
-    .limit(2);
-  if (storeInfoErr) console.error("store_info query:", storeInfoErr.message);
+  const { data: storeRows } = await supabase
+    .from("store_config")
+    .select("key, value, merchant_scoped_id")
+    .limit(40);
 
-  const storeInfo =
-    (storeInfoRows || []).find((row) => row.merchant_scoped_id === mid) ||
-    (storeInfoRows || [])[0];
+  const storeFiltered = (storeRows || []).filter(
+    (r) => !r.merchant_scoped_id || scopeIds.has(r.merchant_scoped_id),
+  );
 
-  if (storeInfo) {
-    context += formatStoreFromSupabase(storeInfo);
+  if (storeFiltered?.length) {
+    context +=
+      "\n[Store info]\n" +
+      storeFiltered.map((r) => `${r.key}: ${r.value}`).join("\n");
   }
 
   return context;
 }
 
 /**
- * Assemble RAG-style context for Claude.
- * Production: Topic 1 (AI StoreBuilder) via storefrontApi.
- * Dev/demo: Supabase tables (labelled in the prompt so evaluators know the boundary).
- *
- * @param {string} userMessage
- * @param {string} merchantScopedId — maps to the SME storefront in Topic 1
+ * Merchant store voice from Lynk onboarding / Settings (store_info table).
  */
-const MAX_CONTEXT_LENGTH = 4000; // Defensive truncation for final context
+async function getStoreInfoContext(merchantScopedId) {
+  const mid = merchantScopedId || "default";
+  const lynkUserId = await resolveLynkUserId(merchantScopedId);
+
+  let data = null;
+
+  if (lynkUserId) {
+    const { data: byUser, error } = await supabase
+      .from("store_info")
+      .select("store_name, hours, currency, instagram_handle, address, other_info")
+      .eq("merchant_scoped_id", lynkUserId)
+      .maybeSingle();
+    if (error) console.error("store_info (user_id):", error.message);
+    data = byUser;
+  }
+
+  if (!data) {
+    const { data: byMid, error } = await supabase
+      .from("store_info")
+      .select("store_name, hours, currency, instagram_handle, address, other_info")
+      .eq("merchant_scoped_id", mid)
+      .maybeSingle();
+    if (error) console.error("store_info (ig_user_id):", error.message);
+    data = byMid;
+  }
+
+  if (!data) return "";
+
+  const lines = [];
+  if (data.store_name) lines.push(`Store name: ${data.store_name}`);
+  if (data.instagram_handle) lines.push(`Instagram: @${data.instagram_handle}`);
+  if (data.hours) lines.push(`Business hours: ${data.hours}`);
+  if (data.currency) lines.push(`Currency: ${data.currency}`);
+  if (data.address) lines.push(`Address: ${data.address}`);
+  lines.push(...formatOtherInfo(data.other_info));
+
+  if (!lines.length) return "";
+  return "\n[Store identity — from merchant settings]\n" + lines.join("\n");
+}
+
+/**
+ * Assemble RAG-style context for Gemini.
+ * Priority: AISLE Storefront → Topic 1 StoreBuilder → Supabase fallback.
+ */
+const MAX_CONTEXT_LENGTH = 4000;
 
 async function getContext(userMessage, merchantScopedId) {
-  const topic1 = await fetchCxContextFromStorebuilder(
-    merchantScopedId,
-    userMessage,
-  );
+  const storeIdentity = await getStoreInfoContext(merchantScopedId);
+
+  const aisle = await fetchCxContextFromAisle(merchantScopedId);
+  if (aisle?.trim()) {
+    let result = aisle + storeIdentity;
+    if (result.length > MAX_CONTEXT_LENGTH) {
+      result = result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
+    }
+    return result;
+  }
+
+  const topic1 = isAisleConfigured()
+    ? null
+    : await fetchCxContextFromStorebuilder(merchantScopedId, userMessage);
 
   if (
     topic1 &&
@@ -250,32 +364,44 @@ async function getContext(userMessage, merchantScopedId) {
     ctx += formatProductsFromTopic1(topic1.products);
     ctx += formatFaqsFromTopic1(topic1.faqs);
     ctx += formatStoreFromTopic1(topic1.store);
-    if (ctx.trim()) return ctx;
-  }
-
-  if (!baseUrl()) {
-    // Explicit note for assessors: without Topic 1 URL, answers come from local/demo DB only
-    const fb = await getContextFromSupabase(userMessage, merchantScopedId);
-    if (!fb.trim()) {
-      return "\n[System note: STOREFRONT_API_BASE_URL is not set — no Topic 1 catalogue loaded.]\n";
+    if (ctx.trim()) {
+      let result = ctx + storeIdentity;
+      if (result.length > MAX_CONTEXT_LENGTH) {
+        result = result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
+      }
+      return result;
     }
-    return fb;
   }
 
-  // Topic 1 configured but empty / error — still try Supabase as secondary cache (optional)
-  const fallback = await getContextFromSupabase(userMessage, merchantScopedId);
-  if (fallback.trim()) {
-    let result =
-      "\n[System note: Topic 1 cx-context returned no rows; partial Supabase fallback follows.]" +
-      fallback;
-    // Truncate if exceeds safe length
+  if (!isAisleConfigured() && !baseUrl()) {
+    const fb = await getContextFromSupabase(userMessage, merchantScopedId);
+    if (!fb.trim() && !storeIdentity.trim()) {
+      return "\n[System note: No catalogue API configured — AISLE or STOREFRONT_API_BASE_URL unset.]\n";
+    }
+    let result = fb + storeIdentity;
     if (result.length > MAX_CONTEXT_LENGTH) {
-      result =
-        result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
+      result = result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
     }
     return result;
   }
-  return "\n[System note: Topic 1 returned no catalogue context for this query.]\n";
+
+  const fallback = await getContextFromSupabase(userMessage, merchantScopedId);
+  if (fallback.trim() || storeIdentity.trim()) {
+    let result =
+      "\n[System note: External catalogue returned no rows; Supabase fallback follows.]" +
+      fallback +
+      storeIdentity;
+    if (result.length > MAX_CONTEXT_LENGTH) {
+      result = result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
+    }
+    return result;
+  }
+
+  if (storeIdentity.trim()) {
+    return storeIdentity;
+  }
+
+  return "\n[System note: No catalogue context available for this merchant.]\n";
 }
 
 module.exports = { getContext };
