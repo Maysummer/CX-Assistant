@@ -188,6 +188,49 @@ async function fetchCxContextFromAisle(merchantScopedId) {
 }
 
 /**
+ * Merchant FAQs from Lynk dashboard (scoped by Lynk user id / ig_user_id).
+ */
+async function getMerchantFaqsContext(merchantScopedId, userMessage) {
+  const mid = merchantScopedId || "default";
+  const lynkUserId = await resolveLynkUserId(merchantScopedId);
+  const scopeIds = new Set([mid, "default"]);
+  if (lynkUserId) scopeIds.add(lynkUserId);
+
+  const { data: faqs, error: faqErr } = await supabase
+    .from("faqs")
+    .select("question, answer, merchant_scoped_id")
+    .limit(40);
+
+  if (faqErr) {
+    console.error("faqs query:", faqErr.message);
+    return "";
+  }
+
+  let faqRows = (faqs || []).filter(
+    (f) => !f.merchant_scoped_id || scopeIds.has(f.merchant_scoped_id),
+  );
+
+  const phrase = searchPhrase(userMessage);
+  if (phrase && faqRows.length) {
+    const matched = faqRows.filter(
+      (f) =>
+        f.question.toLowerCase().includes(phrase.toLowerCase()) ||
+        f.answer.toLowerCase().includes(phrase.toLowerCase()),
+    );
+    faqRows = matched.length ? matched.slice(0, 8) : faqRows.slice(0, 5);
+  } else {
+    faqRows = faqRows.slice(0, 12);
+  }
+
+  if (!faqRows.length) return "";
+
+  return (
+    "\n[FAQs — from merchant]\n" +
+    faqRows.map((f) => `Q: ${f.question}\nA: ${f.answer}`).join("\n\n")
+  );
+}
+
+/**
  * Supabase fallback when external catalogue APIs are not configured or return nothing.
  */
 async function getContextFromSupabase(userMessage, merchantScopedId) {
@@ -301,7 +344,9 @@ async function getStoreInfoContext(merchantScopedId) {
   if (lynkUserId) {
     const { data: byUser, error } = await supabase
       .from("store_info")
-      .select("store_name, hours, currency, instagram_handle, address, other_info")
+      .select(
+        "store_name, hours, currency, instagram_handle, address, other_info",
+      )
       .eq("merchant_scoped_id", lynkUserId)
       .maybeSingle();
     if (error) console.error("store_info (user_id):", error.message);
@@ -311,7 +356,9 @@ async function getStoreInfoContext(merchantScopedId) {
   if (!data) {
     const { data: byMid, error } = await supabase
       .from("store_info")
-      .select("store_name, hours, currency, instagram_handle, address, other_info")
+      .select(
+        "store_name, hours, currency, instagram_handle, address, other_info",
+      )
       .eq("merchant_scoped_id", mid)
       .maybeSingle();
     if (error) console.error("store_info (ig_user_id):", error.message);
@@ -323,8 +370,12 @@ async function getStoreInfoContext(merchantScopedId) {
   const lines = [];
   if (data.store_name) lines.push(`Store name: ${data.store_name}`);
   if (data.instagram_handle) lines.push(`Instagram: @${data.instagram_handle}`);
-  if (data.hours) lines.push(`Business hours: ${data.hours}`);
-  if (data.currency) lines.push(`Currency: ${data.currency}`);
+  if (data.hours) {
+    lines.push(
+      `Owner availability for escalations (bot replies 24/7; use this when customer neds a human during these hours): ${data.hours}`,
+    );
+  }
+  if (data.currency) lines.push(`Store currency: ${data.currency}`);
   if (data.address) lines.push(`Address: ${data.address}`);
   lines.push(...formatOtherInfo(data.other_info));
 
@@ -341,11 +392,14 @@ const MAX_CONTEXT_LENGTH = 4000;
 async function getContext(userMessage, merchantScopedId) {
   const storeIdentity = await getStoreInfoContext(merchantScopedId);
 
+  const faqsBlock = await getMerchantFaqsContext(merchantScopedId, userMessage);
+
   const aisle = await fetchCxContextFromAisle(merchantScopedId);
   if (aisle?.trim()) {
-    let result = aisle + storeIdentity;
+    let result = aisle + faqsBlock + storeIdentity;
     if (result.length > MAX_CONTEXT_LENGTH) {
-      result = result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
+      result =
+        result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
     }
     return result;
   }
@@ -367,7 +421,8 @@ async function getContext(userMessage, merchantScopedId) {
     if (ctx.trim()) {
       let result = ctx + storeIdentity;
       if (result.length > MAX_CONTEXT_LENGTH) {
-        result = result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
+        result =
+          result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
       }
       return result;
     }
@@ -380,7 +435,8 @@ async function getContext(userMessage, merchantScopedId) {
     }
     let result = fb + storeIdentity;
     if (result.length > MAX_CONTEXT_LENGTH) {
-      result = result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
+      result =
+        result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
     }
     return result;
   }
@@ -392,7 +448,8 @@ async function getContext(userMessage, merchantScopedId) {
       fallback +
       storeIdentity;
     if (result.length > MAX_CONTEXT_LENGTH) {
-      result = result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
+      result =
+        result.slice(0, MAX_CONTEXT_LENGTH) + "\n[... context truncated ...]";
     }
     return result;
   }
