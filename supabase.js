@@ -11,8 +11,7 @@ function getClient() {
   if (!supabase) {
     const url = process.env.SUPABASE_URL;
     const key =
-      process.env.SUPABASE_SERVICE_ROLE_KEY ||
-      process.env.SUPABASE_KEY;
+      process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
     if (!url || !key) {
       throw new Error(
         "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY) must be set",
@@ -92,9 +91,47 @@ async function insertOwnerFollowUp(
   if (error) console.error("insertOwnerFollowUp:", error.message);
 }
 
+async function getConversationMode(merchantScopedId, instagramCustomerId) {
+  const mid = merchantScopedId || "default";
+  const { data, error } = await getClient()
+    .from("conversation_modes")
+    .select("*")
+    .eq("merchant_scoped_id", mid)
+    .eq("instagram_customer_id", instagramCustomerId)
+    .maybeSingle();
+  if (error && error.code !== "PGRST116") {
+    console.error("getConversationMode:", error.message);
+  }
+  return data;
+}
+
+async function setConversationMode(
+  merchantScopedId,
+  instagramCustomerId,
+  mode,
+  manualUntil = null,
+) {
+  const mid = merchantScopedId || "default";
+  const payload = {
+    merchant_scoped_id: mid,
+    instagram_customer_id: instagramCustomerId,
+    mode,
+    manual_until: manualUntil ? new Date(manualUntil).toISOString() : null,
+    updated_at: new Date().toISOString(),
+  };
+  const { error } = await getClient()
+    .from("conversation_modes")
+    .upsert(payload, {
+      onConflict: "merchant_scoped_id,instagram_customer_id",
+    });
+  if (error) console.error("setConversationMode:", error.message);
+}
+
 module.exports = {
   supabase: supabaseProxy,
   getSession,
   saveSession,
   insertOwnerFollowUp,
+  getConversationMode,
+  setConversationMode,
 };

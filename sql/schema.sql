@@ -78,3 +78,14 @@ CREATE TABLE IF NOT EXISTS owner_follow_ups (
 
 CREATE INDEX IF NOT EXISTS owner_follow_ups_merchant_status_idx
   ON owner_follow_ups (merchant_scoped_id, status);
+
+CREATE TABLE IF NOT EXISTS conversation_modes (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  merchant_scoped_id   TEXT NOT NULL,
+  instagram_customer_id TEXT NOT NULL,
+  mode                 TEXT NOT NULL DEFAULT 'auto',
+  manual_until         TIMESTAMPTZ,
+  updated_at           TIMESTAMPTZ DEFAULT now(),
+  created_at           TIMESTAMPTZ DEFAULT now(),
+  CONSTRAINT conversation_modes_unique UNIQUE (merchant_scoped_id, instagram_customer_id)
+);

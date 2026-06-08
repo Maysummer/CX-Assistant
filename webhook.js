@@ -8,6 +8,7 @@ const {
 // Idempotency tracking: prevent duplicate message processing
 const seenEvents = new Map(); // { key: timestamp } to detect replays
 const DEDUP_WINDOW_MS = 60000; // 60s window to catch retries
+const processingEvents = new Set(); // Track events currently being processed (async lock)
 
 function getDedupKey(entry, event) {
   // Key format: merchantId:messageId
@@ -77,30 +78,71 @@ async function handleWebhook(req, res) {
           console.log(
             `[WEBHOOK EVENT] mid=${event.message?.mid} sender=${event.sender?.id} ts=${event.timestamp} is_echo=${event.message?.is_echo}`,
           );
-          const text = event.message.text;
-          if (typeof text === "string" && text.trim()) {
-            const dedupKey = getDedupKey(entry, event);
-            if (seenEvents.has(dedupKey)) {
-              console.log(`[DEDUP] Skipping duplicate event: ${dedupKey}`);
+          const senderId = event.sender?.id;
+          const text = event.message?.text;
+          if (typeof text === "string" && text.trim() && senderId) {
+            const now = Date.now();
+
+            // Use a user-based locking key instead of an event-based key
+            const userLockKey = `lock:${senderId}`;
+            const userSeenKey = `seen:${senderId}`;
+
+            // Check if already processed or currently being processed
+            if (processingEvents.has(userLockKey)) {
+              console.log(
+                `[DEDUP-LOCK] Already computing a reply for customer=${senderId}. Dropping concurrent Meta retry.`,
+              );
               continue;
             }
-            seenEvents.set(dedupKey, now);
-            console.log(`Message received for Store: ${merchantScopedId}`);
-
-            if (account) {
-              const handled = await tryAutomationDmReply(account, event);
-              if (handled) continue;
+            if (seenEvents.has(userSeenKey)) {
+              const lastProcessedTime = seenEvents.get(userSeenKey);
+              if (now - lastProcessedTime < 4000) {
+                // 4-second safety window
+                console.log(
+                  `[DEDUP-WINDOW] Sent a reply to customer=${senderId} too recently. Dropping duplicate.`,
+                );
+                continue;
+              }
             }
+            processingEvents.add(userLockKey);
+            seenEvents.set(userSeenKey, now);
 
-            await processMessage(event, { merchantScopedId });
+            console.log(`Message received for Store: ${merchantScopedId}`);
+            console.log(
+              `[WEBHOOK-DEBUG] Processing incoming message: "${text.substring(0, 50)}..."`,
+            );
+
+            try {
+              if (account) {
+                const handled = await tryAutomationDmReply(account, event);
+                if (handled) {
+                  processingEvents.delete(userLockKey);
+                  continue;
+                }
+              }
+              await processMessage(event, { merchantScopedId });
+            } catch (error) {
+              console.error(
+                "[WEBHOOK ERROR] Failed processing message:",
+                error,
+              );
+            } finally {
+              // ALWAYS remove from processing set, even if processMessage crashes
+              processingEvents.delete(userLockKey);
+            }
+          } else if (event.message?.is_echo) {
+            console.log(
+              `[WEBHOOK-DEBUG] SKIPPING echo message (is_echo=true): "${event.message.text?.substring(0, 50)}..."`,
+            );
           }
         }
       }
-
       const changes = entry.changes || [];
       for (const change of changes) {
-        if (change.field !== "comments" || !change.value || !account) continue;
-        await tryAutomationCommentReply(account, change.value);
+        if (change.field === "comments" && change.value && account) {
+          console.log(`[WEBHOOK] Processing incoming comment change...`);
+          await tryAutomationCommentReply(account, change.value);
+        }
       }
     }
   } catch (err) {

@@ -1,10 +1,16 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
-const { getSession, saveSession } = require("./supabase");
+const {
+  getSession,
+  saveSession,
+  getConversationMode,
+  setConversationMode,
+} = require("./supabase");
 const { getContext } = require("./context");
 const { sendReply } = require("./instagram");
 const { extractOwnerTasks, persistOwnerTasks } = require("./ownerFollowUps");
 const { getPageAccessToken } = require("./accountResolver");
 const { recordAiDmOutcome } = require("./dmEvents");
+const { fetchCxContextFromStorebuilder } = require("./storefrontApi");
 
 const genAI = new GoogleGenerativeAI(process.env.AI_API_KEY);
 const model = genAI.getGenerativeModel(
@@ -59,8 +65,45 @@ async function processMessage(event, meta = {}) {
   console.log("--- DEBUG CONTEXT ---\n", context);
   console.log(`Gemini is thinking...`);
 
+  const manualMode = await getConversationMode(merchantScopedId, userId);
+  const now = new Date();
+  if (manualMode?.mode === "manual") {
+    const manualUntilMs = manualMode.manual_until
+      ? new Date(manualMode.manual_until).getTime()
+      : null;
+    if (!manualUntilMs || manualUntilMs > now) {
+      console.log(
+        `[BOT] Skipping auto-reply for customer=${userId} because manual mode is active until ${
+          manualUntil ? manualUntil.toISOString() : "indefinite"
+        }`,
+      );
+      const newHistory = [
+        ...(session?.messages || []),
+        { role: "user", content: userMsg },
+      ];
+      await saveSession(
+        merchantScopedId,
+        userId,
+        newHistory.slice(-MAX_HISTORY_TURNS * 2),
+      );
+      await recordAiDmOutcome({
+        merchantScopedId,
+        event,
+        send: null,
+        escalated: false,
+      });
+      return;
+    }
+    console.log(
+      `[BOT] Manual override window expired for customer=${userId}. Resuming auto-pilot.`,
+    );
+  }
+
   let reply;
   try {
+    console.log(
+      `[BOT-DEBUG] Starting Gemini flow for customer=${userId} (purchase-intent was not triggered or failed)`,
+    );
     const chat = model.startChat({
       history: geminiHistory,
     });
@@ -112,6 +155,14 @@ async function processMessage(event, meta = {}) {
     ]);
   }
 
+  if (escalated) {
+    const manualUntil = new Date(Date.now() + 1000 * 60 * 60).toISOString();
+    await setConversationMode(merchantScopedId, userId, "manual", manualUntil);
+    console.log(
+      `[BOT] Escalation detected; manual mode enabled for customer=${userId} until=${manualUntil}`,
+    );
+  }
+
   const newHistory = [
     ...(session?.messages || []),
     { role: "user", content: userMsg },
@@ -137,6 +188,9 @@ async function processMessage(event, meta = {}) {
     return;
   }
 
+  console.log(
+    `[BOT-DEBUG] Sending Gemini reply via Instagram for customer=${userId}: ${outbound}`,
+  );
   const send = await sendReply(userId, outbound, pageToken);
   await recordAiDmOutcome({
     merchantScopedId,
