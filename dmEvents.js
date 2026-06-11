@@ -25,7 +25,13 @@ async function resolveOwnerUserId(merchantScopedId) {
  * Log outcome after Gemini sends (or cannot send) a DM.
  * Call this whenever the customer should see sent vs needs-human on the Lynk dashboard.
  */
-async function recordAiDmOutcome({ merchantScopedId, event, send, escalated }) {
+async function recordAiDmOutcome({
+  merchantScopedId,
+  event,
+  send,
+  escalated,
+  paused = false,
+}) {
   const igEventId = resolveIgEventId(event);
   const ownerUserId = await resolveOwnerUserId(merchantScopedId);
 
@@ -63,7 +69,9 @@ async function recordAiDmOutcome({ merchantScopedId, event, send, escalated }) {
       automationId: null,
       igEventId,
       status: "skipped",
-      error: "Needs human — Instagram not connected for AI reply",
+      error: paused
+        ? "Thread paused — owner handling"
+        : "Needs human — Instagram not connected for AI reply",
       payload: event,
     });
     return;

@@ -1,8 +1,9 @@
 const axios = require("axios");
+const { registerBotOutbound } = require("./botOutbound");
 
-const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v20.0";
+const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v19.0";
 
-async function sendReply(recipientId, text, pageAccessToken) {
+async function sendReply(recipientId, text, pageAccessToken, track) {
   const maxLen = 1000;
   const body = text.length > maxLen ? `${text.slice(0, maxLen - 1)}…` : text;
 
@@ -11,14 +12,7 @@ async function sendReply(recipientId, text, pageAccessToken) {
     console.error(
       "sendReply: no page access token (connect Instagram in Lynk or set PAGE_ACCESS_TOKEN)",
     );
-    throw new Error("PAGE_ACCESS_TOKEN required");
-  }
-
-  // Instagram Business Account ID from environment (required for production)
-  const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID;
-  if (!INSTAGRAM_ACCOUNT_ID) {
-    console.error("sendReply: INSTAGRAM_ACCOUNT_ID not set in environment");
-    throw new Error("INSTAGRAM_ACCOUNT_ID required");
+    return { ok: false, message: "PAGE_ACCESS_TOKEN required" };
   }
 
   const url = `https://graph.facebook.com/${GRAPH_VERSION}/me/messages`;
@@ -35,15 +29,18 @@ async function sendReply(recipientId, text, pageAccessToken) {
         params: { access_token: token },
       },
     );
+    const messageId = res.data?.message_id;
+    if (messageId && track?.merchantScopedId) {
+      await registerBotOutbound(track.merchantScopedId, recipientId, messageId);
+    }
     console.log("Reply sent successfully:", res.data);
-    return { ok: true };
+    return { ok: true, messageId };
   } catch (err) {
     const message = err.response?.data
       ? JSON.stringify(err.response.data)
       : err.message;
-    // This will print the specific reason (e.g., "Permission denied" or "Invalid ID")
     console.error("sendReply failed:", message);
-    return { ok: false, error: message };
+    return { ok: false, message };
   }
 }
 

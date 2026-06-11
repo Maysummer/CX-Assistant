@@ -4,6 +4,12 @@ const {
   tryAutomationDmReply,
   tryAutomationCommentReply,
 } = require("./automation");
+const {
+  isThreadPaused,
+  pauseForEscalation,
+} = require("./conversationMode");
+const { ensureOpenFollowUp } = require("./ownerFollowUps");
+const { isBotOutboundEcho } = require("./botOutbound");
 
 // Idempotency tracking: prevent duplicate message processing
 const seenEvents = new Map(); // { key: timestamp } to detect replays
@@ -45,6 +51,32 @@ function merchantScopedIdFromEntry(entry) {
     : process.env.DEFAULT_MERCHANT_SCOPED_ID || "default";
 }
 
+async function handleMerchantEcho(merchantScopedId, account, event) {
+  const mid = event.message?.mid;
+  const customerId = event.recipient?.id;
+  const senderId = event.sender?.id;
+  if (!mid || !customerId) return;
+  if (account && customerId === account.ig_user_id) return;
+  if (account && senderId && senderId !== account.ig_user_id) return;
+
+  if (await isBotOutboundEcho(mid)) {
+    console.log(`[ECHO] Bot outbound echo mid=${mid} — not pausing`);
+    return;
+  }
+
+  if (!(await isThreadPaused(merchantScopedId, customerId))) {
+    await pauseForEscalation(merchantScopedId, customerId);
+    await ensureOpenFollowUp(
+      merchantScopedId,
+      customerId,
+      "Owner replied manually — bot paused for this customer",
+    );
+    console.log(
+      `[ECHO] Owner manual reply to customer=${customerId} — thread paused`,
+    );
+  }
+}
+
 async function handleWebhook(req, res) {
   res.sendStatus(200);
 
@@ -74,13 +106,21 @@ async function handleWebhook(req, res) {
 
       const messaging = entry.messaging || [];
       for (const event of messaging) {
-        if (event.message && !event.message.is_echo) {
-          console.log(
-            `[WEBHOOK EVENT] mid=${event.message?.mid} sender=${event.sender?.id} ts=${event.timestamp} is_echo=${event.message?.is_echo}`,
-          );
-          const senderId = event.sender?.id;
-          const text = event.message?.text;
-          if (typeof text === "string" && text.trim() && senderId) {
+        if (!event.message) continue;
+
+        if (event.message.is_echo) {
+          const preview = event.message.text?.substring(0, 50) ?? "";
+          console.log(`[ECHO] merchant outbound: "${preview}..."`);
+          await handleMerchantEcho(merchantScopedId, account, event);
+          continue;
+        }
+
+        console.log(
+          `[WEBHOOK EVENT] mid=${event.message?.mid} sender=${event.sender?.id} ts=${event.timestamp} is_echo=${event.message?.is_echo}`,
+        );
+        const senderId = event.sender?.id;
+        const text = event.message?.text;
+        if (typeof text === "string" && text.trim() && senderId) {
             const now = Date.now();
 
             // Use a user-based locking key instead of an event-based key
@@ -113,6 +153,11 @@ async function handleWebhook(req, res) {
             );
 
             try {
+              if (await isThreadPaused(merchantScopedId, senderId)) {
+                await processMessage(event, { merchantScopedId });
+                processingEvents.delete(userLockKey);
+                continue;
+              }
               if (account) {
                 const handled = await tryAutomationDmReply(account, event);
                 if (handled) {
@@ -130,11 +175,6 @@ async function handleWebhook(req, res) {
               // ALWAYS remove from processing set, even if processMessage crashes
               processingEvents.delete(userLockKey);
             }
-          } else if (event.message?.is_echo) {
-            console.log(
-              `[WEBHOOK-DEBUG] SKIPPING echo message (is_echo=true): "${event.message.text?.substring(0, 50)}..."`,
-            );
-          }
         }
       }
       const changes = entry.changes || [];

@@ -4,7 +4,7 @@
  * (fed by Topic 1 or a GTCO SME console) should poll or subscribe to notify the owner.
  */
 
-const { insertOwnerFollowUp } = require("./supabase");
+const { insertOwnerFollowUp, supabase } = require("./supabase");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const OWNER_TASK_PREFIX = "OWNER_TASK:";
@@ -73,20 +73,41 @@ function extractOwnerTasks(fullReply) {
   const lines = fullReply.split("\n");
   const tasks = [];
   const kept = [];
+  let escalate = false;
   for (const line of lines) {
     const t = line.trim();
     if (t.startsWith(OWNER_TASK_PREFIX)) {
       tasks.push(t.slice(OWNER_TASK_PREFIX.length).trim());
+    } else if (/^ESCALATE$/i.test(t)) {
+      escalate = true;
     } else {
       kept.push(line);
     }
   }
-  return { customerText: kept.join("\n").trim(), tasks };
+  return { customerText: kept.join("\n").trim(), tasks, escalate };
 }
 
 /**
  * Persist owner reminders; strip OWNER_TASK lines from the DM the customer receives.
  */
+function isOpenFollowUpStatus(status) {
+  if (status == null || String(status).trim() === "") return true;
+  return !/^done$/i.test(String(status).trim());
+}
+
+async function ensureOpenFollowUp(merchantScopedId, instagramCustomerId, summary) {
+  const mid = merchantScopedId || "default";
+  const { data } = await supabase
+    .from("owner_follow_ups")
+    .select("id, status")
+    .eq("merchant_scoped_id", mid)
+    .eq("instagram_customer_id", instagramCustomerId);
+
+  if (data?.some((r) => isOpenFollowUpStatus(r.status))) return;
+
+  await insertOwnerFollowUp(merchantScopedId, instagramCustomerId, summary);
+}
+
 async function persistOwnerTasks(merchantScopedId, instagramCustomerId, tasks) {
   for (const summary of tasks) {
     if (!summary) continue;
@@ -115,4 +136,5 @@ module.exports = {
   extractOwnerTasks,
   persistOwnerTasks,
   translateTaskToEnglish,
+  ensureOpenFollowUp,
 };

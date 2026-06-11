@@ -136,19 +136,13 @@ async function tryAutomationDmReply(account, event) {
   });
 
   if (!match) {
-    await recordDmEvent({
-      userId: account.user_id,
-      automationId: null,
-      igEventId: mid,
-      status: "skipped",
-      error: "No matching active DM automation",
-      payload: event,
-    });
     return false;
   }
 
   const { sendReply } = require("./instagram");
-  const send = await sendReply(senderId, match.replyBody, account.access_token);
+  const send = await sendReply(senderId, match.replyBody, account.access_token, {
+    merchantScopedId: account.ig_user_id,
+  });
   await recordDmEvent({
     userId: account.user_id,
     automationId: match.automation.id,
@@ -199,6 +193,7 @@ async function tryAutomationCommentReply(account, changeValue) {
     commenterId,
     match.replyBody,
     account.access_token,
+    { merchantScopedId: account.ig_user_id },
   );
   await recordDmEvent({
     userId: account.user_id,
