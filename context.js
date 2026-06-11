@@ -4,6 +4,7 @@ const {
   fetchAisleStorefrontProducts,
   formatAisleCatalogueForPrompt,
   isAisleConfigured,
+  resolveStorefrontUrl,
 } = require("./aisleStorefront");
 const {
   resolveMerchantInstagramHandle,
@@ -332,14 +333,9 @@ async function getContextFromSupabase(userMessage, merchantScopedId) {
   return context;
 }
 
-/**
- * Merchant store voice from Lynk onboarding / Settings (store_info table).
- */
-async function getStoreInfoContext(merchantScopedId) {
+async function loadStoreInfoRow(merchantScopedId) {
   const mid = merchantScopedId || "default";
   const lynkUserId = await resolveLynkUserId(merchantScopedId);
-
-  let data = null;
 
   if (lynkUserId) {
     const { data: byUser, error } = await supabase
@@ -350,21 +346,25 @@ async function getStoreInfoContext(merchantScopedId) {
       .eq("merchant_scoped_id", lynkUserId)
       .maybeSingle();
     if (error) console.error("store_info (user_id):", error.message);
-    data = byUser;
+    if (byUser) return byUser;
   }
 
-  if (!data) {
-    const { data: byMid, error } = await supabase
-      .from("store_info")
-      .select(
-        "store_name, hours, currency, instagram_handle, address, other_info",
-      )
-      .eq("merchant_scoped_id", mid)
-      .maybeSingle();
-    if (error) console.error("store_info (ig_user_id):", error.message);
-    data = byMid;
-  }
+  const { data: byMid, error } = await supabase
+    .from("store_info")
+    .select(
+      "store_name, hours, currency, instagram_handle, address, other_info",
+    )
+    .eq("merchant_scoped_id", mid)
+    .maybeSingle();
+  if (error) console.error("store_info (ig_user_id):", error.message);
+  return byMid;
+}
 
+/**
+ * Merchant store voice from Lynk onboarding / Settings (store_info table).
+ */
+async function getStoreInfoContext(merchantScopedId) {
+  const data = await loadStoreInfoRow(merchantScopedId);
   if (!data) return "";
 
   const lines = [];
@@ -461,4 +461,32 @@ async function getContext(userMessage, merchantScopedId) {
   return "\n[System note: No catalogue context available for this merchant.]\n";
 }
 
-module.exports = { getContext };
+/** Customer checkout URL for this merchant's AISLE storefront. */
+async function getStorefrontUrl(merchantScopedId) {
+  const instagram = await resolveMerchantInstagramHandle(merchantScopedId);
+  return resolveStorefrontUrl(instagram);
+}
+
+/** Display name for customer-facing greetings (store_info, then AISLE catalogue). */
+async function getStoreName(merchantScopedId) {
+  const info = await loadStoreInfoRow(merchantScopedId);
+  if (info?.store_name?.trim()) return info.store_name.trim();
+
+  if (isAisleConfigured()) {
+    const instagram = await resolveMerchantInstagramHandle(merchantScopedId);
+    if (instagram) {
+      try {
+        const data = await fetchAisleStorefrontProducts({ instagram });
+        if (data.store?.business_name?.trim()) {
+          return data.store.business_name.trim();
+        }
+      } catch (e) {
+        console.error("[getStoreName] AISLE lookup:", e.message || e);
+      }
+    }
+  }
+
+  return "our store";
+}
+
+module.exports = { getContext, getStorefrontUrl, getStoreName };

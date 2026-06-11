@@ -1,6 +1,6 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { getSession, saveSession } = require("./supabase");
-const { getContext } = require("./context");
+const { getContext, getStorefrontUrl, getStoreName } = require("./context");
 const { sendReply } = require("./instagram");
 const {
   extractOwnerTasks,
@@ -32,9 +32,10 @@ Rules:
 - For "what do you have?", "what's available?", "show me your products", or similar — if [CATALOG DATA] includes a product list, reply with a short friendly list (name, price, brief detail). You already have the catalogue; answer the customer yourself.
 - NEVER output OWNER_TASK asking the merchant to "provide product catalog", "provide product list", or "give catalogue to the assistant". Those are forbidden.
 - When you commit to checking something specific with the team (e.g., "I'll check if we carry X" or "I'll confirm availability"), output an OWNER_TASK line describing what to check.
-- Use OWNER_TASK for actionable owner work: confirmed orders, reservations, custom requests, specific commitments, or team checks the customer is waiting on.
+- Use OWNER_TASK for actionable owner work: reservations, custom requests, specific commitments, or team checks the customer is waiting on.
+- When the customer wants to buy or order a product, confirm the item and price, then include the Online storefront URL from [CATALOG DATA] so they can shop and checkout. Do NOT create OWNER_TASK for standard online purchases when a storefront link is available.
 - If [CATALOG DATA] has no products, still reply helpfully — say the team is updating the catalogue and ask what they are looking for. Do NOT hand off for greetings or small talk.
-- Greetings (hi, hello, good morning, etc.): reply warmly and ask how you can help. NEVER output ESCALATE for greetings alone.
+- Greetings (hi, hello, good morning, etc.): reply warmly. NEVER output ESCALATE for greetings alone.
 - If a specific fact is missing, say you'll check with the team. Output ESCALATE on its own line ONLY when the customer explicitly asks for a human/owner/manager, or has an urgent issue you cannot resolve. Never use ESCALATE just because the catalogue is empty.
 - Keep replies short and Instagram-friendly (a few sentences or a compact bullet list).
 `.trim();
@@ -73,11 +74,22 @@ function isCasualGreeting(text) {
   return GREETING_STARTERS.has(words[0]);
 }
 
+function greetingReply(storeName) {
+  const name = String(storeName || "our store").trim() || "our store";
+  return `Welcome to ${name}, I am Lynk Assistant. How may I help you?`;
+}
+
 function defaultReplyFor(userMsg) {
   if (isCasualGreeting(userMsg)) {
-    return "Hello! Thanks for reaching out. How can I help you today?";
+    return greetingReply("our store");
   }
   return "Thanks for your message! How can I help you today?";
+}
+
+async function greetingReplyFor(merchantScopedId, userMsg) {
+  if (!isCasualGreeting(userMsg)) return defaultReplyFor(userMsg);
+  const storeName = await getStoreName(merchantScopedId);
+  return greetingReply(storeName);
 }
 
 function looksLikeHandoffText(text) {
@@ -87,6 +99,41 @@ function looksLikeHandoffText(text) {
     t.includes("passed your message along") ||
     t.includes("trouble connecting to my brain") ||
     t.includes("notify the owner for you")
+  );
+}
+
+const PURCHASE_INTENT_PATTERNS = [
+  /\b(i\s*(want|would like|'d like)\s+to\s+)?(buy|purchase|order|get)\b/i,
+  /\bcan\s+i\s+(buy|order|get)\b/i,
+  /\bhow\s+(do\s+i|can\s+i)\s+(buy|order|pay|checkout)\b/i,
+  /\bi('ll| will)\s+(take|get)\b/i,
+  /\bplace\s+(an?\s+)?order\b/i,
+  /\bcheckout\b/i,
+  /\bsend\s+me\s+(the\s+)?(link|store)\b/i,
+];
+
+function isPurchaseIntent(text) {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  return PURCHASE_INTENT_PATTERNS.some((p) => p.test(t));
+}
+
+function withStorefrontLink(text, userMsg, storefrontUrl) {
+  if (!storefrontUrl || !isPurchaseIntent(userMsg)) return text;
+  const body = String(text || "").trim();
+  if (body.toLowerCase().includes(storefrontUrl.toLowerCase())) return body;
+  return `${body}\n\nShop and complete your order here:\n${storefrontUrl}`;
+}
+
+function isOrderConfirmationTask(summary) {
+  const s = String(summary || "").toLowerCase();
+  return (
+    s.includes("confirm order") ||
+    s.includes("arrange payment") ||
+    s.includes("wants to buy") ||
+    s.includes("place an order") ||
+    s.includes("complete their order") ||
+    s.includes("checkout")
   );
 }
 
@@ -266,6 +313,21 @@ async function processMessage(event, meta = {}) {
     return;
   }
 
+  if (isCasualGreeting(userMsg)) {
+    const outbound = await greetingReplyFor(merchantScopedId, userMsg);
+    console.log(`[BOT] Greeting for customer=${userId}: ${outbound}`);
+    await sendBotReply({
+      merchantScopedId,
+      userId,
+      userMsg,
+      session,
+      event,
+      outbound,
+      escalated: false,
+    });
+    return;
+  }
+
   const geminiHistory = normalizeHistory(session?.messages);
   const context = await getContext(userMsg, merchantScopedId);
 
@@ -333,10 +395,33 @@ async function processMessage(event, meta = {}) {
         userMsg,
         session,
         event,
-        outbound: defaultReplyFor(userMsg),
+        outbound: await greetingReplyFor(merchantScopedId, userMsg),
         escalated: false,
       });
       return;
+    }
+
+    if (isPurchaseIntent(userMsg)) {
+      const storefrontUrl = await getStorefrontUrl(merchantScopedId);
+      if (storefrontUrl) {
+        console.warn(
+          `[BOT] Gemini failed for purchase intent — sending storefront link`,
+        );
+        await sendBotReply({
+          merchantScopedId,
+          userId,
+          userMsg,
+          session,
+          event,
+          outbound: withStorefrontLink(
+            "Great choice! You can shop and complete your order on our store:",
+            userMsg,
+            storefrontUrl,
+          ),
+          escalated: false,
+        });
+        return;
+      }
     }
 
     const preview =
@@ -357,14 +442,7 @@ async function processMessage(event, meta = {}) {
     tasks,
     escalate: modelEscalated,
   } = extractOwnerTasks(reply);
-  const greeting = isCasualGreeting(userMsg);
-  let escalated = modelEscalated && !greeting;
-
-  if (modelEscalated && greeting) {
-    console.warn(
-      `[BOT] Ignoring model ESCALATE for casual greeting from customer=${userId}`,
-    );
-  }
+  const escalated = modelEscalated;
 
   let outbound;
   if (escalated) {
@@ -379,10 +457,22 @@ async function processMessage(event, meta = {}) {
     }
   }
 
+  const storefrontUrl = !escalated
+    ? await getStorefrontUrl(merchantScopedId)
+    : null;
+  if (storefrontUrl) {
+    outbound = withStorefrontLink(outbound, userMsg, storefrontUrl);
+  }
+
   console.log(`Gemini Reply: ${outbound}`);
 
-  if (!greeting && tasks.length > 0) {
-    await persistOwnerTasks(merchantScopedId, userId, tasks);
+  let tasksToPersist = tasks;
+  if (storefrontUrl && isPurchaseIntent(userMsg)) {
+    tasksToPersist = tasks.filter((t) => !isOrderConfirmationTask(t));
+  }
+
+  if (tasksToPersist.length > 0) {
+    await persistOwnerTasks(merchantScopedId, userId, tasksToPersist);
   } else if (escalated) {
     const preview =
       userMsg.length > 160 ? `${userMsg.slice(0, 160)}…` : userMsg;
